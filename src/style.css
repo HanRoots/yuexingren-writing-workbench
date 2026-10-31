@@ -8,3 +8,5 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 .brand{gap:10px;padding:12px 13px}.brand img{width:36px;max-height:42px}.brand strong{font-size:15px;white-space:nowrap;color:#102986}.mobile-header{gap:10px}.mobile-header .mobile-brand{display:flex;align-items:center;gap:9px}.mobile-brand img{width:31px;height:31px}.mobile-brand strong{font-size:14px;color:#102986}
+
+.remember-key{display:flex;min-height:44px;margin:-3px 0 10px;font-size:12px;white-space:normal;line-height:1.7;cursor:pointer}.remember-key input{flex-shrink:0}

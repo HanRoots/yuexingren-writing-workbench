@@ -5,18 +5,9 @@ import { recognizeWriting } from './ai.js';
 import { renderStudent, textDownload } from './export.js';
 import { loadWorkspace, saveWorkspace, clearWorkspace } from './storage.js';
 import { readImageFile } from './media.js';
+import { API_PRESETS as PROVIDER_PRESETS, loadApiSettings, saveApiSettings, forgetApiKey } from './api-settings.js';
 
 const ASSETS = `${import.meta.env.BASE_URL}assets/`;
-const PROVIDER_PRESETS = {
-  openai: { baseUrl: 'https://api.openai.com/v1', model: '' },
-  gemini: { baseUrl: 'https://generativelanguage.googleapis.com/v1beta', model: '' },
-  deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' },
-};
-const DEFAULT_SETTINGS = { provider: 'openai', ...PROVIDER_PRESETS.openai, apiKey: '' };
-function initialSettings() {
-  try { const s = JSON.parse(localStorage.getItem('yxr-api-preferences')); return { ...DEFAULT_SETTINGS, ...s, apiKey: '' }; }
-  catch { return { ...DEFAULT_SETTINGS }; }
-}
 function Button({ children, icon: Icon, primary, className = '', ...props }) {
   return <button className={`button ${primary ? 'primary' : ''} ${className}`} {...props}>{Icon && <Icon size={18} aria-hidden="true" />}{children}</button>;
 }
@@ -36,7 +27,7 @@ export default function App() {
   const [storageReady, setStorageReady] = useState(false);
   const [step, setStep] = useState(1);
   const [pageIndex, setPageIndex] = useState(0);
-  const [settings, setSettings] = useState(initialSettings);
+  const [settings, setSettings] = useState(loadApiSettings);
   const [providerDraft, setProviderDraft] = useState(settings.provider);
   const [modal, setModal] = useState(null);
   const [busy, setBusy] = useState('');
@@ -125,12 +116,22 @@ export default function App() {
   function saveSettings(e) {
     e.preventDefault();
     const form = new FormData(e.currentTarget);
-    const next = { provider: form.get('provider'), baseUrl: form.get('baseUrl').trim(), model: form.get('model').trim(), apiKey: form.get('apiKey').trim() };
+    const next = { provider: form.get('provider'), baseUrl: form.get('baseUrl').trim(), model: form.get('model').trim(), apiKey: form.get('apiKey').trim(), rememberApiKey: form.get('rememberApiKey') === 'on' };
     try { const url = new URL(next.baseUrl); if (!['https:', 'http:'].includes(url.protocol) || (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) || url.username || url.password || url.search || url.hash) throw Error(); }
     catch { return tell('请填写不带密钥和参数的 HTTPS API 地址；本机 localhost 可用 HTTP。', true); }
-    setSettings(next); setModal(null);
-    try { localStorage.setItem('yxr-api-preferences', JSON.stringify({ ...next, apiKey: undefined })); tell('API 设置已更新，密钥只在当前页面内存中使用。'); }
-    catch { tell('设置在当前页面生效；浏览器未允许保存接口偏好，刷新后需重新填写。'); }
+    try {
+      setSettings(saveApiSettings(next)); setModal(null);
+      tell(next.rememberApiKey ? 'API 设置已保存，下次打开会自动填入密钥。' : 'API 设置已更新，密钥仅本次有效。');
+    } catch (e) {
+      setSettings({ ...next, rememberApiKey: false }); setModal(null);
+      tell(`${e.message} 当前页面仍可使用这些设置。`, true);
+    }
+  }
+  function clearApiKey() {
+    try {
+      forgetApiKey(); setSettings(s => ({ ...s, apiKey: '', rememberApiKey: false })); setModal(null);
+      tell('已清除当前页面及本机保存的 API 密钥。');
+    } catch (e) { tell(e.message, true); }
   }
   async function clearAll() {
     try { await clearWorkspace(); const s = createStudent(); setStorageReady(true); setStudents([s]); setActiveId(s.id); setPreview(null); setStep(1); setModal(null); tell('已清空本机习作草稿。'); }
@@ -198,7 +199,7 @@ export default function App() {
     </main>
     <nav className="mobile-nav" aria-label="手机导航"><button onClick={() => setStep(1)}><FileText size={20} />学生习作</button><button onClick={() => setModal('help')}><BookOpen size={20} />使用说明</button><button onClick={() => setModal('settings')}><Settings size={20} />API 设置</button></nav>
     {modal === 'settings' && <Modal title="AI API 设置" onClose={() => setModal(null)}><form onSubmit={saveSettings}>
-      <p className="modal-intro">填写你自己的 AI 服务。识别需要支持图片输入的模型。</p><Field label="接口类型"><select name="provider" value={providerDraft} onChange={e => { const provider = e.target.value; const form = e.target.form; setProviderDraft(provider); form.elements.baseUrl.value = PROVIDER_PRESETS[provider].baseUrl; form.elements.model.value = PROVIDER_PRESETS[provider].model; form.elements.apiKey.value = ''; }}><option value="openai">OpenAI 兼容接口</option><option value="gemini">Gemini 原生接口</option><option value="deepseek">DeepSeek</option></select></Field>{providerDraft === 'deepseek' && <p className="modal-intro">默认使用支持图片识别的 deepseek-flash，请填写 DeepSeek API 密钥。</p>}<Field label="API 地址"><input name="baseUrl" type="url" defaultValue={settings.baseUrl} required autoComplete="off" spellCheck="false" placeholder="https://你的服务地址/v1" /></Field><Field label="模型名称"><input name="model" defaultValue={settings.model} required autoComplete="off" spellCheck="false" placeholder="填写支持图片识别的模型名称" /></Field><Field label="API 密钥"><input name="apiKey" type="password" defaultValue={settings.apiKey} required autoComplete="off" spellCheck="false" placeholder="密钥仅在当前页面使用" /></Field><div className="settings-note"><ShieldCheck size={20} /><p>密钥只保存在页面内存中，刷新后需重新填写，不会写入 GitHub。点击识别时，原稿会发送到上方配置的服务。该服务需允许浏览器跨域请求；可填写你自己的代理地址。</p></div><div className="modal-actions">{settings.apiKey && <Button type="button" onClick={() => { setSettings(s => ({ ...s, apiKey: '' })); setModal(null); tell('已从当前页面清除 API 密钥。'); }}>清除密钥</Button>}<Button type="button" onClick={() => setModal(null)}>取消</Button><Button primary type="submit">保存设置</Button></div>
+      <p className="modal-intro">填写你自己的 AI 服务。识别需要支持图片输入的模型。</p><Field label="接口类型"><select name="provider" value={providerDraft} onChange={e => { const provider = e.target.value; const form = e.target.form; setProviderDraft(provider); form.elements.baseUrl.value = PROVIDER_PRESETS[provider].baseUrl; form.elements.model.value = PROVIDER_PRESETS[provider].model; form.elements.apiKey.value = ''; }}><option value="openai">OpenAI 兼容接口</option><option value="gemini">Gemini 原生接口</option><option value="deepseek">DeepSeek</option></select></Field>{providerDraft === 'deepseek' && <p className="modal-intro">默认使用支持图片识别的 deepseek-flash，请填写 DeepSeek API 密钥。</p>}<Field label="API 地址"><input name="baseUrl" type="url" defaultValue={settings.baseUrl} onChange={e => { e.target.form.elements.apiKey.value = ''; }} required autoComplete="off" spellCheck="false" placeholder="https://你的服务地址/v1" /></Field><Field label="模型名称"><input name="model" defaultValue={settings.model} required autoComplete="off" spellCheck="false" placeholder="填写支持图片识别的模型名称" /></Field><Field label="API 密钥"><input name="apiKey" type="password" defaultValue={settings.apiKey} required autoComplete="off" spellCheck="false" placeholder="填写你的 API 密钥" /></Field><label className="checkbox remember-key"><input type="checkbox" name="rememberApiKey" defaultChecked={settings.rememberApiKey} />在本机记住密钥，下次自动填入</label><div className="settings-note"><ShieldCheck size={20} /><p>勾选后密钥保存在当前浏览器，下次自动填入；取消勾选后仅本次有效。点击识别时，原稿会发送到配置的服务，服务需允许浏览器跨域调用。</p></div><div className="modal-actions">{(settings.apiKey || settings.rememberApiKey) && <Button type="button" onClick={clearApiKey}>清除密钥</Button>}<Button type="button" onClick={() => setModal(null)}>取消</Button><Button primary type="submit">保存设置</Button></div>
     </form></Modal>}
     {modal === 'help' && <Modal title="使用说明" onClose={() => setModal(null)}><ol className="help-list"><li><strong>按同学上传照片</strong><p>每位同学单独添加，可多选照片，使用上下箭头调整页序。较大的照片会自动等比缩小，保留整页内容。拍摄时保持清晰、完整、方向正确。</p></li><li><strong>识别并对照原稿</strong><p>在 API 设置中填写自己的接口和多模态模型，点击识别；已有转写文字可直接粘贴。保留孩子原意，只做最小校订。</p></li><li><strong>分别确认正文和摘录</strong><p>修正疑难字后确认全文。摘录必须逐字来自正文，也可关闭摘录。修改文字、原稿或副标题后需要重新确认。</p></li><li><strong>生成并下载图片</strong><p>长图包含完整文字和逐页手写原稿，宽 1440 px。下载 JPG 直接分享，或下载 PNG 高清保存。</p></li></ol><div className="help-data"><strong>关于数据保存</strong><p>习作草稿保存在当前浏览器，可清空；不在不同设备间同步。浏览器清理或隐私模式可能导致草稿丢失。重新打开草稿后，需要再次核对确认。AI 识别会使用你自己的 API 额度。</p></div><div className="modal-actions"><Button primary onClick={() => setModal(null)}>开始整理</Button></div></Modal>}
     {modal === 'original' && currentPage && <Modal title={`手写原稿 · 第 ${Math.min(pageIndex + 1, student.pages.length)} 页`} onClose={() => { setModal(null); setZoom(100); }} wide><div className="zoom-controls"><label>缩放 <input aria-label="原稿缩放比例" type="range" min="70" max="220" step="10" value={zoom} onChange={e => setZoom(Number(e.target.value))} /></label><span>{zoom}%</span><Button disabled={pageIndex === 0} onClick={() => { setPageIndex(i => i - 1); setZoom(100); }} icon={ChevronLeft}>上一页</Button><Button disabled={pageIndex >= student.pages.length - 1} onClick={() => { setPageIndex(i => i + 1); setZoom(100); }} icon={ChevronRight}>下一页</Button></div><div className="zoom-viewport"><img src={currentPage.dataUrl} alt={`手写原稿第 ${pageIndex + 1} 页放大图`} style={{ width: `${zoom}%`, maxWidth: 'none' }} /></div></Modal>}
