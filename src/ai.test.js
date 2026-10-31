@@ -74,3 +74,56 @@ run(async function acceptsRootAndFullOpenaiUrlsWithoutDuplicatingPaths() {
     }
   } finally {globalThis.fetch=original;}
 });
+run(async function deepseekDefaultsToOfficialEndpointAndPreservesVisionPayload() {
+  const original = globalThis.fetch;
+  const orderedPages = [...pages, {dataUrl:'data:image/png;base64,Yg=='}];
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, 'https://api.deepseek.com/chat/completions');
+    assert.equal(init.headers.Authorization, 'Bearer test-only');
+    assert.equal(init.redirect, 'error');
+    const payload = JSON.parse(init.body);
+    assert.equal(payload.model, 'deepseek-flash');
+    assert.deepEqual(payload.thinking, {type:'disabled'});
+    assert.deepEqual(payload.response_format, {type:'json_object'});
+    assert.equal(payload.max_tokens, undefined);
+    assert.equal(payload.messages[0].role, 'system');
+    assert.equal(payload.messages[1].role, 'user');
+    assert.deepEqual(payload.messages[1].content.slice(1), orderedPages.map(page => ({
+      type:'image_url', image_url:{url:page.dataUrl,detail:'high'},
+    })));
+    return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(output)}}]}));
+  };
+  try {
+    assert.deepEqual(await recognizeWriting({pages:orderedPages,settings:{...settings,provider:'deepseek',baseUrl:'',model:'deepseek-flash'}}), output);
+  } finally {globalThis.fetch=original;}
+});
+run(async function deepseekRespectsCustomPathsAndModelsWithoutSwitching() {
+  const original = globalThis.fetch;
+  try {
+    for (const [baseUrl, expected] of [
+      ['https://example.test/v1', 'https://example.test/v1/chat/completions'],
+      ['https://example.test/api/v1/', 'https://example.test/api/v1/chat/completions'],
+      ['https://example.test/chat/completions', 'https://example.test/chat/completions'],
+    ]) {
+      globalThis.fetch = async (url, init) => {
+        assert.equal(url, expected);
+        assert.equal(JSON.parse(init.body).model, 'custom-vision-model');
+        return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(output)}}]}));
+      };
+      await recognizeWriting({pages,settings:{...settings,provider:'deepseek',baseUrl,model:'custom-vision-model'}});
+    }
+  } finally {globalThis.fetch=original;}
+});
+run(async function deepseekRejectsKnownTextOnlyAndRetiredModelsWithoutNetwork() {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; throw new Error('Must not fetch'); };
+  try {
+    for (const model of ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner']) {
+      await assert.rejects(recognizeWriting({pages,settings:{...settings,provider:'deepseek',baseUrl:'',model}}), /不支持图片识别或已退役/);
+      // The official host must also be guarded when chosen through the generic adapter.
+      await assert.rejects(recognizeWriting({pages,settings:{...settings,baseUrl:'https://api.deepseek.com',model}}), /不支持图片识别或已退役/);
+    }
+    assert.equal(calls, 0);
+  } finally {globalThis.fetch=original;}
+});

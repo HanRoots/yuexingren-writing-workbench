@@ -35,6 +35,9 @@
 | --- | --- | --- |
 | OpenAI 兼容 | `https://api.openai.com/v1` | 兼容 Chat Completions、图片输入和 JSON 输出 |
 | Gemini | `https://generativelanguage.googleapis.com/v1beta` | 支持图片输入及 JSON 输出的 Gemini 模型 |
+| DeepSeek | `https://api.deepseek.com` | 默认 `deepseek-flash`，支持原稿照片输入及 JSON 输出 |
+
+选择 DeepSeek 后自动填好地址及 `deepseek-flash` 模型，填写自己的 DeepSeek 密钥即可。按 [DeepSeek 官方图像理解文档](https://api-docs.deepseek.com/zh-cn/guides/vision/) 接入；`deepseek-v4-pro` 不支持图片，旧的 `deepseek-chat` / `deepseek-reasoner` 也不适用于本工作台的照片识别。切换服务商时会清空当前密钥输入，避免误用其他服务的密钥。
 
 可以改成兼容上述协议的自有服务地址。请使用**多模态模型**；仅支持文字的模型不能读取手写照片。模型名称和可用额度以服务商账户为准。
 
