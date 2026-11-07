@@ -2,12 +2,20 @@ import React, { useEffect, useRef, useState } from 'react';
 import { FileText, BookOpen, Settings, Folder, Plus, Upload, Sparkles, Info, X, ChevronLeft, ChevronRight, ArrowUp, ArrowDown, Trash2, Check, Download, Image as ImageIcon, Copy, PencilLine, LoaderCircle, ZoomIn, ShieldCheck, Menu, ArrowRight } from 'lucide-react';
 import { createStudent, updateStudent, confirmBody, confirmQuote, canExport, exportBlockingReasons, isQuoteExact } from './domain.js';
 import { recognizeWriting } from './ai.js';
-import { renderStudent, textDownload } from './export.js';
+import { renderStudentPages, textDownload } from './export.js';
+import { createImageZip } from './download-zip.js';
 import { loadWorkspace, saveWorkspace, clearWorkspace } from './storage.js';
 import { readImageFile } from './media.js';
 import { API_PRESETS as PROVIDER_PRESETS, loadApiSettings, saveApiSettings, forgetApiKey } from './api-settings.js';
 
 const ASSETS = `${import.meta.env.BASE_URL}assets/`;
+function releasePreview(value) {
+  for (const page of value?.pages || []) {
+    URL.revokeObjectURL(page.url); URL.revokeObjectURL(page.jpgUrl);
+  }
+  if (value?.pngZipUrl) URL.revokeObjectURL(value.pngZipUrl);
+  if (value?.jpgZipUrl) URL.revokeObjectURL(value.jpgZipUrl);
+}
 function Button({ children, icon: Icon, primary, className = '', ...props }) {
   return <button className={`button ${primary ? 'primary' : ''} ${className}`} {...props}>{Icon && <Icon size={18} aria-hidden="true" />}{children}</button>;
 }
@@ -35,11 +43,13 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState('本机工作区');
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState(null);
+  const [outputFormat, setOutputFormat] = useState('long');
+  const [previewIndex, setPreviewIndex] = useState(0);
+  const [renderPage, setRenderPage] = useState(0);
   const [zoom, setZoom] = useState(100);
   const [replaceRequest, setReplaceRequest] = useState(false);
   const fileInput = useRef();
   const abortRef = useRef();
-  const canvasRef = useRef(null);
   const versionRef = useRef(0);
   const student = students.find(s => s.id === activeId) || students[0];
 
@@ -61,15 +71,15 @@ export default function App() {
     const t = setTimeout(() => saveWorkspace(students).then(() => setSaveStatus('草稿已存本机')).catch(e => { setSaveStatus('草稿未保存'); setNotice({ error: true, text: e.message }); }), 500);
     return () => clearTimeout(t);
   }, [students, hydrated, storageReady]);
-  useEffect(() => { setPageIndex(0); setPreview(null); canvasRef.current = null; }, [activeId]);
+  useEffect(() => { setPageIndex(0); setPreview(null); }, [activeId]);
   useEffect(() => { if (!notice || notice.error) return; const t = setTimeout(() => setNotice(null), 4200); return () => clearTimeout(t); }, [notice]);
-  useEffect(() => () => { if (preview?.url) URL.revokeObjectURL(preview.url); if (preview?.jpgUrl) URL.revokeObjectURL(preview.jpgUrl); }, [preview]);
+  useEffect(() => () => releasePreview(preview), [preview]);
 
   function tell(text, error = false) { setNotice({ text, error }); }
   function apply(patch) {
     versionRef.current += 1;
     setStudents(all => all.map(s => s.id === student.id ? updateStudent(s, patch) : s));
-    setPreview(null); canvasRef.current = null;
+    setPreview(null);
   }
   function chooseStudent(id) { if (busy) return; setActiveId(id); setStep(1); }
   function addStudent() { const s = createStudent(); setStudents(all => [...all, s]); setActiveId(s.id); setStep(1); }
@@ -87,7 +97,7 @@ export default function App() {
     const target = students.find(s => s.id === targetId);
     if (target.pages.length >= 20) return tell('目标同学已有 20 页，请分次处理。', true);
     setStudents(all => all.map(s => s.id === student.id ? updateStudent(s, { pages: s.pages.filter(p => p.id !== pageId) }) : s.id === targetId ? updateStudent(s, { pages: [...s.pages, page] }) : s));
-    setPreview(null); canvasRef.current = null; setPageIndex(0); tell('原稿已移至另一位同学，请重新核对文字。');
+    setPreview(null); setPageIndex(0); tell('原稿已移至另一位同学，请重新核对文字。');
   }
   async function recognize() {
     if (!settings.apiKey || !settings.model) { setModal('settings'); tell('先填写 API 密钥和支持图片的模型，再开始识别。'); return; }
@@ -106,12 +116,44 @@ export default function App() {
     try { const updated = kind === 'body' ? confirmBody(student) : confirmQuote(student); setStudents(all => all.map(s => s.id === student.id ? updated : s)); tell(kind === 'body' ? '当前正文已确认。' : '当前摘录已确认。'); }
     catch (e) { tell(e.message, true); }
   }
+  function chooseOutputFormat(format) {
+    if (busy || format === outputFormat) return;
+    versionRef.current += 1;
+    setOutputFormat(format); setPreview(null); setPreviewIndex(0);
+  }
   async function generate() {
+    if (busy) return;
     const version = versionRef.current;
-    setBusy('render');
-    try { const canvas = await renderStudent(student); const encode = (type) => new Promise((resolve, reject) => canvas.toBlob(v => v ? resolve(v) : reject(new Error('生成图片失败，请减少原稿页数后重试。')), type, 0.95)); const [png, jpg] = await Promise.all([encode('image/png'), encode('image/jpeg')]); if (version !== versionRef.current) { tell('内容已变更，请重新确认后再生成图片。'); return; } canvasRef.current = canvas; setPreview({ url: URL.createObjectURL(png), jpgUrl: URL.createObjectURL(jpg), stem: `${student.name ? student.name + '-' : ''}${student.title}`.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 100), width: canvas.width, height: canvas.height }); tell('长图已生成，可以下载 JPG 或 PNG。'); }
-    catch (e) { tell(e.message, true); }
-    finally { setBusy(''); }
+    const format = outputFormat;
+    const stem = `${student.name ? student.name + '-' : ''}${student.title}`.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 100);
+    const result = {format, stem, pages: [], pngZipUrl: '', jpgZipUrl: ''};
+    const encoded = [];
+    setBusy('render'); setRenderPage(1);
+    const checkVersion = () => { if (version !== versionRef.current) throw new Error('内容已变更，请重新确认后再生成图片。'); };
+    try {
+      for await (const canvas of renderStudentPages(student, {format})) {
+        try {
+          checkVersion(); setRenderPage(result.pages.length + 1);
+          const encode = type => new Promise((resolve, reject) => canvas.toBlob(v => v ? resolve(v) : reject(new Error('生成图片失败，请减少原稿页数后重试。')), type, 0.95));
+          const [png, jpg] = await Promise.all([encode('image/png'), encode('image/jpeg')]);
+          checkVersion();
+          const filename = `${stem}-${format === 'a4' ? `A4-第${String(result.pages.length + 1).padStart(2, '0')}页` : '长图'}`;
+          const page = {url: '', jpgUrl: '', width: canvas.width, height: canvas.height, filename};
+          result.pages.push(page);
+          page.url = URL.createObjectURL(png); page.jpgUrl = URL.createObjectURL(jpg);
+          encoded.push({png, jpg, filename});
+        } finally { canvas.width = 0; canvas.height = 0; }
+      }
+      if (result.pages.length > 1) {
+        const pngZip = await createImageZip(encoded.map(p => ({name: `${p.filename}.png`, blob: p.png})));
+        checkVersion(); result.pngZipUrl = URL.createObjectURL(pngZip);
+        const jpgZip = await createImageZip(encoded.map(p => ({name: `${p.filename}.jpg`, blob: p.jpg})));
+        checkVersion(); result.jpgZipUrl = URL.createObjectURL(jpgZip);
+      }
+      checkVersion(); setPreviewIndex(0); setPreview(result);
+      tell(format === 'a4' ? `已生成 ${result.pages.length} 页 A4 图片，可逐页或打包下载。` : '长图已生成，可以下载 JPG 或 PNG。');
+    } catch (e) { releasePreview(result); tell(e.message, true); }
+    finally { setBusy(''); setRenderPage(0); }
   }
   function saveSettings(e) {
     e.preventDefault();
@@ -142,6 +184,7 @@ export default function App() {
   const currentPage = student.pages[Math.min(pageIndex, student.pages.length - 1)];
   const reasons = exportBlockingReasons(student);
   const ready = canExport(student);
+  const renderedPage = preview?.pages[Math.min(previewIndex, preview.pages.length - 1)];
   return <>
     <aside className="sidebar">
       <div className="brand"><img src={`${ASSETS}logo-mark.png`} alt="" /><strong>阅星人读书社</strong></div>
@@ -189,19 +232,34 @@ export default function App() {
             <section className="confirmation-section"><div className="section-label"><h3>正文核对</h3><span className={`status ${student.bodyConfirmed ? 'done' : ''}`}>{student.bodyConfirmed ? '已确认' : '待确认'}</span></div><div className="reading-copy"><h4>{student.title || '尚未填写题目'}</h4>{(student.name || student.date) && <p className="reading-meta">{[student.name, student.date].filter(Boolean).join(' · ')}</p>}<div>{student.body || '请返回编辑，填写完整正文。'}</div></div><div className="confirm-action"><p>请核对全文、原稿归属和页序。</p><Button icon={student.bodyConfirmed ? Check : undefined} disabled={student.bodyConfirmed || !student.body.trim()} onClick={() => confirm('body')}>{student.bodyConfirmed ? '正文已确认' : '确认当前正文'}</Button></div></section>
             <section className="confirmation-section quote-section"><div className="section-label"><h3>拟用文中摘录</h3><label className="checkbox"><input type="checkbox" checked={student.includeQuote} onChange={e => apply({ includeQuote: e.target.checked })} />使用摘录</label></div>{student.includeQuote ? <><textarea className="quote-editor" aria-label="拟用文中摘录" value={student.quote} onChange={e => apply({ quote: e.target.value })} placeholder="粘贴正文中准备放进图片的一句完整原句" /><div className="confirm-action"><p className={student.quote && !isQuoteExact(student) ? 'invalid' : ''}>{student.quote && !isQuoteExact(student) ? '摘录须为正文中的完整原句，字词和标点保持一致。' : '摘录须为完整原句，确认后放入浅绿摘录区。'}</p><Button icon={student.quoteConfirmed ? Check : undefined} disabled={student.quoteConfirmed || !isQuoteExact(student)} onClick={() => confirm('quote')}>{student.quoteConfirmed ? '摘录已确认' : '确认当前摘录'}</Button></div></> : <p className="no-quote">本图不设摘录。</p>}<Field label="副标题" optional><input value={student.subtitle} onChange={e => apply({ subtitle: e.target.value })} placeholder="如需副标题，请在确认正文前填写" /></Field></section>
             {!ready && <div className="export-requirements"><Info size={17} /><span>{reasons.join('；')}。</span></div>}
-            <div className="export-actions"><p>{preview ? `${preview.width} × ${preview.height} px · 每位同学单独生成` : '确认完成后，生成包含文字与原稿的完整长图。'}</p><Button primary icon={busy === 'render' ? LoaderCircle : ImageIcon} disabled={!ready || Boolean(busy)} onClick={generate}>{busy === 'render' ? '正在生成…' : preview ? '重新生成图片' : '生成下载图片'}</Button></div>
-            {preview && <div className="result"><div className="result-heading"><h3><Check size={20} />长图已生成</h3><div><a className="button primary" href={preview.jpgUrl} download={`${preview.stem}.jpg`}><Download size={18} />下载 JPG</a><a className="button" href={preview.url} download={`${preview.stem}.png`}><Download size={18} />下载 PNG</a></div></div><div className="result-image"><img src={preview.url} alt={`${student.title}完整分享长图预览`} /></div><p>JPG 适合直接分享，PNG 适合高清保存。手机也可长按图片保存。下载后，本次流程即完成。</p></div>}
+            <fieldset className="output-format" disabled={Boolean(busy)}>
+              <legend>图片尺寸</legend>
+              <div className="format-options">
+                <label className={outputFormat === 'long' ? 'selected' : ''}><input type="radio" name="outputFormat" value="long" checked={outputFormat === 'long'} onChange={() => chooseOutputFormat('long')} /><span><strong>长图比例</strong><small>宽 1440 px，高度随内容增长</small></span></label>
+                <label className={outputFormat === 'a4' ? 'selected' : ''}><input type="radio" name="outputFormat" value="a4" checked={outputFormat === 'a4'} onChange={() => chooseOutputFormat('a4')} /><span><strong>A4 比例</strong><small>2480 × 3508 px，内容较多自动分页</small></span></label>
+              </div>
+            </fieldset>
+            <div className="export-actions"><p>{preview ? `${renderedPage.width} × ${renderedPage.height} px · ${preview.format === 'a4' ? `共 ${preview.pages.length} 页 A4 图片` : '每位同学单独生成'}` : outputFormat === 'a4' ? '正文自动分页，手写原稿每页单独排入 A4，不裁切。' : '确认完成后，生成包含文字与原稿的完整长图。'}</p><Button primary icon={busy === 'render' ? LoaderCircle : ImageIcon} disabled={!ready || Boolean(busy)} onClick={generate}>{busy === 'render' ? `正在生成第 ${renderPage} 页…` : preview ? '重新生成图片' : '生成下载图片'}</Button></div>
+            {preview && <div className="result">
+              <div className="result-heading"><h3><Check size={20} />{preview.format === 'a4' ? 'A4 图片已生成' : '长图已生成'}</h3><div><a className="button primary" href={renderedPage.jpgUrl} download={`${renderedPage.filename}.jpg`}><Download size={18} />{preview.pages.length > 1 ? '下载本页 JPG' : '下载 JPG'}</a><a className="button" href={renderedPage.url} download={`${renderedPage.filename}.png`}><Download size={18} />{preview.pages.length > 1 ? '下载本页 PNG' : '下载 PNG'}</a></div></div>
+              {preview.pages.length > 1 && <>
+                <div className="result-pagination"><Button icon={ChevronLeft} disabled={previewIndex === 0} onClick={() => setPreviewIndex(i => i - 1)}>上一页</Button><span aria-live="polite">第 {previewIndex + 1} / {preview.pages.length} 页</span><Button icon={ChevronRight} disabled={previewIndex >= preview.pages.length - 1} onClick={() => setPreviewIndex(i => i + 1)}>下一页</Button></div>
+                <div className="archive-actions"><a className="button" href={preview.jpgZipUrl} download={`${preview.stem}-A4-JPG.zip`}><Download size={17} />打包下载全部 JPG</a><a className="button" href={preview.pngZipUrl} download={`${preview.stem}-A4-PNG.zip`}><Download size={17} />打包下载全部 PNG</a></div>
+              </>}
+              <div className={`result-image ${preview.format === 'a4' ? 'a4-preview' : ''}`}><img src={renderedPage.url} alt={`${student.title}${preview.format === 'a4' ? ` A4 第 ${previewIndex + 1} 页` : '完整分享长图'}预览`} /></div><p>JPG 适合直接分享，PNG 适合高清保存。手机也可长按图片保存。下载后，本次流程即完成。</p>
+            </div>}
+
           </>}
         </section>
       </div>
-      <footer className="page-footer"><div><FileText /><span><strong>正文与摘录，分别确认</strong><small>核对后再生成长图。</small></span></div><div><ImageIcon /><span><strong>PNG 与 JPG，直接下载</strong><small>每位同学单独生成。</small></span></div><span className="footer-note">本地处理 · 自有 API</span></footer>
+      <footer className="page-footer"><div><FileText /><span><strong>正文与摘录，分别确认</strong><small>核对后再生成图片。</small></span></div><div><ImageIcon /><span><strong>PNG 与 JPG，直接下载</strong><small>每位同学单独生成。</small></span></div><span className="footer-note">本地处理 · 自有 API</span></footer>
       <div className="utility-row"><button className="text-button muted" onClick={() => setModal('clear')} disabled={Boolean(busy)}>清空本机草稿</button>{students.length > 1 && <button className="text-button muted" disabled={Boolean(busy)} onClick={() => setModal('delete')}>移除当前同学</button>}<span>照片与文字仅保存在当前浏览器。</span></div>
     </main>
     <nav className="mobile-nav" aria-label="手机导航"><button onClick={() => setStep(1)}><FileText size={20} />学生习作</button><button onClick={() => setModal('help')}><BookOpen size={20} />使用说明</button><button onClick={() => setModal('settings')}><Settings size={20} />API 设置</button></nav>
     {modal === 'settings' && <Modal title="AI API 设置" onClose={() => setModal(null)}><form onSubmit={saveSettings}>
       <p className="modal-intro">填写你自己的 AI 服务。识别需要支持图片输入的模型。</p><Field label="接口类型"><select name="provider" value={providerDraft} onChange={e => { const provider = e.target.value; const form = e.target.form; setProviderDraft(provider); form.elements.baseUrl.value = PROVIDER_PRESETS[provider].baseUrl; form.elements.model.value = PROVIDER_PRESETS[provider].model; form.elements.apiKey.value = ''; }}><option value="openai">OpenAI 兼容接口</option><option value="gemini">Gemini 原生接口</option><option value="deepseek">DeepSeek</option></select></Field>{providerDraft === 'deepseek' && <p className="modal-intro">默认使用支持图片识别的 deepseek-flash，请填写 DeepSeek API 密钥。</p>}<Field label="API 地址"><input name="baseUrl" type="url" defaultValue={settings.baseUrl} onChange={e => { e.target.form.elements.apiKey.value = ''; }} required autoComplete="off" spellCheck="false" placeholder="https://你的服务地址/v1" /></Field><Field label="模型名称"><input name="model" defaultValue={settings.model} required autoComplete="off" spellCheck="false" placeholder="填写支持图片识别的模型名称" /></Field><Field label="API 密钥"><input name="apiKey" type="password" defaultValue={settings.apiKey} required autoComplete="off" spellCheck="false" placeholder="填写你的 API 密钥" /></Field><label className="checkbox remember-key"><input type="checkbox" name="rememberApiKey" defaultChecked={settings.rememberApiKey} />在本机记住密钥，下次自动填入</label><div className="settings-note"><ShieldCheck size={20} /><p>勾选后密钥保存在当前浏览器，下次自动填入；取消勾选后仅本次有效。点击识别时，原稿会发送到配置的服务，服务需允许浏览器跨域调用。</p></div><div className="modal-actions">{(settings.apiKey || settings.rememberApiKey) && <Button type="button" onClick={clearApiKey}>清除密钥</Button>}<Button type="button" onClick={() => setModal(null)}>取消</Button><Button primary type="submit">保存设置</Button></div>
     </form></Modal>}
-    {modal === 'help' && <Modal title="使用说明" onClose={() => setModal(null)}><ol className="help-list"><li><strong>按同学上传照片</strong><p>每位同学单独添加，可多选照片，使用上下箭头调整页序。较大的照片会自动等比缩小，保留整页内容。拍摄时保持清晰、完整、方向正确。</p></li><li><strong>识别并对照原稿</strong><p>在 API 设置中填写自己的接口和多模态模型，点击识别；已有转写文字可直接粘贴。保留孩子原意，只做最小校订。</p></li><li><strong>分别确认正文和摘录</strong><p>修正疑难字后确认全文。摘录必须逐字来自正文，也可关闭摘录。修改文字、原稿或副标题后需要重新确认。</p></li><li><strong>生成并下载图片</strong><p>长图包含完整文字和逐页手写原稿，宽 1440 px。下载 JPG 直接分享，或下载 PNG 高清保存。</p></li></ol><div className="help-data"><strong>关于数据保存</strong><p>习作草稿保存在当前浏览器，可清空；不在不同设备间同步。浏览器清理或隐私模式可能导致草稿丢失。重新打开草稿后，需要再次核对确认。AI 识别会使用你自己的 API 额度。</p></div><div className="modal-actions"><Button primary onClick={() => setModal(null)}>开始整理</Button></div></Modal>}
+    {modal === 'help' && <Modal title="使用说明" onClose={() => setModal(null)}><ol className="help-list"><li><strong>按同学上传照片</strong><p>每位同学单独添加，可多选照片，使用上下箭头调整页序。较大的照片会自动等比缩小，保留整页内容。拍摄时保持清晰、完整、方向正确。</p></li><li><strong>识别并对照原稿</strong><p>在 API 设置中填写自己的接口和多模态模型，点击识别；已有转写文字可直接粘贴。保留孩子原意，只做最小校订。</p></li><li><strong>分别确认正文和摘录</strong><p>修正疑难字后确认全文。摘录必须逐字来自正文，也可关闭摘录。修改文字、原稿或副标题后需要重新确认。</p></li><li><strong>生成并下载图片</strong><p>生成前可选择长图比例或 A4 比例。长图宽 1440 px；A4 图片为 2480 × 3508 px，正文自动分页，手写原稿单独排页。两种尺寸均可下载 JPG 或 PNG，多页 A4 支持打包下载。</p></li></ol><div className="help-data"><strong>关于数据保存</strong><p>习作草稿保存在当前浏览器，可清空；不在不同设备间同步。浏览器清理或隐私模式可能导致草稿丢失。重新打开草稿后，需要再次核对确认。AI 识别会使用你自己的 API 额度。</p></div><div className="modal-actions"><Button primary onClick={() => setModal(null)}>开始整理</Button></div></Modal>}
     {modal === 'original' && currentPage && <Modal title={`手写原稿 · 第 ${Math.min(pageIndex + 1, student.pages.length)} 页`} onClose={() => { setModal(null); setZoom(100); }} wide><div className="zoom-controls"><label>缩放 <input aria-label="原稿缩放比例" type="range" min="70" max="220" step="10" value={zoom} onChange={e => setZoom(Number(e.target.value))} /></label><span>{zoom}%</span><Button disabled={pageIndex === 0} onClick={() => { setPageIndex(i => i - 1); setZoom(100); }} icon={ChevronLeft}>上一页</Button><Button disabled={pageIndex >= student.pages.length - 1} onClick={() => { setPageIndex(i => i + 1); setZoom(100); }} icon={ChevronRight}>下一页</Button></div><div className="zoom-viewport"><img src={currentPage.dataUrl} alt={`手写原稿第 ${pageIndex + 1} 页放大图`} style={{ width: `${zoom}%`, maxWidth: 'none' }} /></div></Modal>}
     {modal === 'replace' && <Modal title="重新识别这篇习作？" onClose={() => setModal(null)}><p className="modal-intro">新的识别结果会替换当前正文和摘录，已完成的确认也会重置。</p><div className="modal-actions"><Button onClick={() => setModal(null)}>取消</Button><Button primary onClick={() => { setReplaceRequest(true); setModal('replace-ready'); }}>继续识别</Button></div></Modal>}
     {modal === 'replace-ready' && <RunOnce action={() => recognize()} />}

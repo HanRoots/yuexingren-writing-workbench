@@ -115,7 +115,7 @@ function imageFrom(source, description) {
   });
 }
 
-function bodyLayout(ctx, student, top) {
+function bodyLayout(ctx, student, top, options = {}) {
   const rows = student.body.replace(/\r\n?/g, '\n').split('\n');
   const filled = rows.map((text, index) => ({text: text.trim(), index})).filter(row => row.text);
   const first = filled[0];
@@ -140,18 +140,18 @@ function bodyLayout(ctx, student, top) {
     const isDate = lastIndexes.has(i) && /^(?:\d{2,4}[年./-]\s*\d{1,2}[月./-]\s*\d{1,2}日?|\d{1,2}月\s*\d{1,2}日)$/.test(text);
     const isSignature = lastIndexes.has(i) && Boolean(student.name?.trim()) &&
       (text === student.name.trim() || new RegExp(`^(?:您的|你的|学生|儿子|女儿|爱您的|爱你的)[：: ]*${escapeRegExp(student.name.trim())}$`).test(text));
-    const size = isSalutation ? 43 : 36;
-    const indent = isSalutation || isRespect || isSignature || isDate ? 0 : 76;
-    const lineHeight = isSalutation ? 76 : 74;
+    const size = isSalutation ? (options.salutationSize ?? 43) : (options.bodySize ?? 36);
+    const indent = isSalutation || isRespect || isSignature || isDate ? 0 : (options.indent ?? 76);
+    const lineHeight = isSalutation ? (options.salutationLineHeight ?? 76) : (options.lineHeight ?? 74);
     const lines = wrappedBlock(ctx, text, size, TEXT_W, TEXT_X, y, lineHeight, C.text, 400, indent);
     if ((isSignature || isDate) && isLetter) {
       font(ctx, size);
       for (const line of lines) line.x = W - TEXT_X - ctx.measureText(line.text).width;
     }
     // Sincerely is deliberately indented; respect stays flush left.
-    if (isSincerely) lines[0].x = TEXT_X + 76;
+    if (isSincerely) lines[0].x = TEXT_X + (options.indent ?? 76);
     ops.push(...lines);
-    y += lines.length * lineHeight + (isRespect || isSincerely || isSignature || isDate ? 12 : 38);
+    y += lines.length * lineHeight + (isRespect || isSincerely || isSignature || isDate ? 12 : (options.paragraphSpacing ?? 38));
   }
   return {ops, bottom: y + 42};
 }
@@ -172,7 +172,7 @@ export async function renderStudent(input) {
     document.fonts.load('700 98px MiSans'),
     document.fonts.ready,
   ]);
-  const logoSource = `${import.meta.env.BASE_URL}assets/logo.png`;
+  const logoSource = `${import.meta.env?.BASE_URL || './'}assets/logo.png`;
   const [logo, ...images] = await Promise.all([
     imageFrom(logoSource, '阅星人 Logo'),
     ...student.pages.map((page, i) => imageFrom(page.dataUrl, `第 ${i + 1} 页原稿`)),
@@ -228,7 +228,7 @@ export async function renderStudent(input) {
   const footerY = cardY - 42 + 100;
   const height = Math.ceil(footerY + 145);
   if (height > MAX_HEIGHT || W * height > MAX_PIXELS) {
-    throw new Error('这篇原稿过长，超出了浏览器单张长图的尺寸限制。请减少本篇原稿页数，或拆成两篇分别导出。');
+    throw new Error('这篇内容超出了单张长图的尺寸限制。请选择 A4 比例自动分页，或分篇生成。');
   }
   const canvas = document.createElement('canvas');
   canvas.width = W;
@@ -276,6 +276,166 @@ export async function renderStudent(input) {
   try { ctx.getImageData(W - 1, height - 1, 1, 1); }
   catch { throw new Error('当前浏览器无法处理这张长图，请减少原稿页数，或改用电脑浏览器导出。'); }
   return canvas;
+}
+
+export const A4_SIZE = Object.freeze({width: 2480, height: 3508});
+const A4_H = A4_SIZE.height * W / A4_SIZE.width;
+const A4_BOTTOM = A4_H - 172;
+const MAX_A4_PAGES = 100;
+
+function a4Section(ctx, label, y, compact = false) {
+  font(ctx, 30);
+  ctx.fillStyle = C.navy;
+  ctx.fillText(label === '手写原稿' ? '02' : '01', OUTER, y + 10);
+  font(ctx, 42, 700);
+  ctx.fillText(label, 205, y);
+  rule(ctx, 530, y + 31, compact ? W - OUTER - 210 : W - OUTER);
+}
+
+// Paginate semantic text lines, rather than cutting a long raster into slices.
+// Header, excerpt and body can each continue onto another full A4 page.
+function a4TextPages(ctx, student) {
+  const pages = [];
+  let page;
+  let cursor;
+  function newPage(kind = 'heading') {
+    if (pages.length >= MAX_A4_PAGES) throw new Error('A4 页数过多，请把本篇内容拆成几篇后分别生成。');
+    page = {ops: [], boxes: [], sections: [], headerHeight: kind === 'heading' ? A4_H : 220, first: pages.length === 0};
+    pages.push(page);
+    cursor = page.first ? 120 : 260;
+    if (kind === 'body') {
+      page.sections.push({label: '文字整理稿', y: 112, compact: true});
+      page.bodyTop = 220;
+      cursor = 268;
+    }
+  }
+  function addHeading(text, size, lineHeight, color, weight = 400, width = 1000) {
+    font(ctx, size, weight);
+    for (const line of wrap(ctx, text, width)) {
+      if (cursor + size + 20 > A4_BOTTOM) newPage('heading');
+      page.ops.push({text: line, x: OUTER, y: cursor, size, weight, color});
+      cursor += lineHeight;
+    }
+    cursor += 14;
+  }
+  newPage();
+  addHeading(student.title.trim(), 72, 94, C.navy, 700, 900);
+  if (student.subtitle?.trim()) addHeading(student.subtitle.trim(), 30, 46, C.text);
+  const meta = [student.name?.trim(), student.date?.trim()].filter(Boolean).join('  ·  ');
+  if (meta) addHeading(meta, 27, 42, C.muted);
+  page.headerHeight = Math.max(cursor + 28, page.first ? 330 : 300);
+  cursor = page.headerHeight + 38;
+
+  if (student.includeQuote && student.quote) {
+    font(ctx, 44, 700);
+    const lines = wrap(ctx, student.quote, TEXT_W);
+    let index = 0;
+    while (index < lines.length) {
+      if (cursor + 184 > A4_BOTTOM) newPage('quote');
+      const capacity = Math.max(1, Math.floor((A4_BOTTOM - cursor - 118) / 66));
+      const chunk = lines.slice(index, index + capacity);
+      const height = 118 + chunk.length * 66;
+      page.boxes.push({top: cursor, height, fill: C.quote});
+      page.ops.push({text: '文中摘录', x: TEXT_X, y: cursor + 26, size: 25, weight: 400, color: C.muted});
+      chunk.forEach((text, i) => page.ops.push({text, x: TEXT_X, y: cursor + 82 + i * 66, size: 44, weight: 700, color: C.navy}));
+      cursor += height + 48;
+      index += chunk.length;
+      if (index < lines.length) newPage('quote');
+    }
+  }
+
+  if (cursor + 88 + 48 + 100 > A4_BOTTOM) newPage('body');
+  else {
+    page.sections.push({label: '文字整理稿', y: cursor, compact: false});
+    page.bodyTop = cursor + 88;
+    cursor = page.bodyTop + 48;
+  }
+  const body = bodyLayout(ctx, student, -72, {
+    bodySize: 34, salutationSize: 38, indent: 68,
+    lineHeight: 58, salutationLineHeight: 66, paragraphSpacing: 24,
+  });
+  body.ops.forEach((op, i) => {
+    if (cursor + op.size + 44 > A4_BOTTOM) newPage('body');
+    page.ops.push({...op, y: cursor});
+    page.bodyBottom = cursor + op.size + 44;
+    const advance = body.ops[i + 1] ? body.ops[i + 1].y - op.y : 58;
+    cursor += advance;
+  });
+  return pages;
+}
+
+function a4Canvas(logo, index, total, first = false) {
+  const canvas = document.createElement('canvas');
+  canvas.width = A4_SIZE.width;
+  canvas.height = A4_SIZE.height;
+  const ctx = canvas.getContext('2d', {alpha: false});
+  if (!ctx) throw new Error('当前浏览器无法生成 A4 图片，请使用电脑浏览器重试。');
+  ctx.scale(A4_SIZE.width / W, A4_SIZE.width / W);
+  ctx.fillStyle = C.white;
+  ctx.fillRect(0, 0, W, A4_H);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  const logoWidth = first ? 228 : 150;
+  ctx.drawImage(logo, W - OUTER - logoWidth, 60, logoWidth, logo.naturalHeight * logoWidth / logo.naturalWidth);
+  rule(ctx, OUTER, A4_H - 110, W - OUTER);
+  font(ctx, 27, 700);
+  ctx.fillStyle = C.navy;
+  ctx.fillText('阅星人读书社', OUTER, A4_H - 76);
+  font(ctx, 24);
+  ctx.fillStyle = C.muted;
+  const count = `${index + 1} / ${total}`;
+  ctx.fillText(count, W - OUTER - ctx.measureText(count).width, A4_H - 73);
+  return {canvas, ctx};
+}
+
+/** Yield one page at a time so multi-page A4 output does not retain full canvases. */
+export async function* renderStudentPages(input, {format = 'long'} = {}) {
+  if (format === 'long') {
+    yield await renderStudent(input);
+    return;
+  }
+  if (format !== 'a4') throw new Error('请选择长图或 A4 比例。');
+  const student = structuredClone(input);
+  if (!canExport(student)) throw new Error(exportBlockingReasons(student).join('；'));
+  await Promise.all([document.fonts.load('34px MiSans'), document.fonts.load('700 72px MiSans'), document.fonts.ready]);
+  const logo = await imageFrom(`${import.meta.env?.BASE_URL || './'}assets/logo.png`, '阅星人 Logo');
+  const measureCanvas = document.createElement('canvas');
+  const measure = measureCanvas.getContext('2d');
+  if (!measure) throw new Error('当前浏览器无法生成 A4 图片，请使用电脑浏览器重试。');
+  const plans = a4TextPages(measure, student);
+  const total = plans.length + student.pages.length;
+  if (total > MAX_A4_PAGES) throw new Error('A4 页数过多，请把本篇内容拆成几篇后分别生成。');
+  for (const [index, plan] of plans.entries()) {
+    const {canvas, ctx} = a4Canvas(logo, index, total, plan.first);
+    for (const box of plan.boxes) roundRect(ctx, OUTER, box.top, W - 2 * OUTER, box.height, box.fill);
+    if (plan.bodyTop !== undefined) roundRect(ctx, OUTER, plan.bodyTop, W - 2 * OUTER, plan.bodyBottom - plan.bodyTop);
+    for (const s of plan.sections) a4Section(ctx, s.label, s.y, s.compact);
+    paintText(ctx, plan.ops);
+    yield canvas;
+  }
+  // Every manuscript photo gets a complete sheet. Fit within the sheet; never crop.
+  for (const [index, page] of student.pages.entries()) {
+    const image = await imageFrom(page.dataUrl, `第 ${index + 1} 页原稿`);
+    const {canvas, ctx} = a4Canvas(logo, plans.length + index, total);
+    a4Section(ctx, '手写原稿', 112, true);
+    const top = 260;
+    const bottom = A4_BOTTOM;
+    roundRect(ctx, OUTER, top, W - OUTER * 2, bottom - top);
+    font(ctx, 30, 700);
+    ctx.fillStyle = C.navy;
+    ctx.fillText(`原稿 · 第 ${index + 1} 页`, 130, top + 26);
+    rule(ctx, 130, top + 80, W - 130);
+    const maxWidth = W - 260;
+    const maxHeight = bottom - top - 136;
+    const scale = Math.min(maxWidth / image.naturalWidth, maxHeight / image.naturalHeight);
+    const width = image.naturalWidth * scale;
+    const height = image.naturalHeight * scale;
+    ctx.drawImage(image, (W - width) / 2, top + 106 + (maxHeight - height) / 2, width, height);
+    image.onload = null;
+    image.onerror = null;
+    image.removeAttribute?.('src');
+    yield canvas;
+  }
 }
 
 function safeStem(stem) {
